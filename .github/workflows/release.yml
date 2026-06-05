@@ -50,7 +50,7 @@ concurrency:
 jobs:
   release:
     name: Automated Release
-    uses: falkcorp/github-common/.github/workflows/reusable-release.yml@aac93cb1c5148c3274cac30c401a0e27fab45526
+    uses: falkcorp/github-common/.github/workflows/reusable-release.yml@483f3afeb0064ccbe6ad565044042ba6faee1f96 # v2.14.0
     with:
       release-type: ${{ inputs.release-type || 'auto' }}
       build-target: 'all'
