@@ -23,7 +23,7 @@ runs:
         path: proto-generated
 
     - name: Build and test Rust
-      uses: jdfalk/release-rust-action@802c77330bc57b1b97f123958131f40ccb2f4896 # v1.0.3
+      uses: falkcorp/gha-release-rust@802c77330bc57b1b97f123958131f40ccb2f4896 # v1.0.3
       with:
         rust-version: stable
         manifest-path: ./Cargo.toml
