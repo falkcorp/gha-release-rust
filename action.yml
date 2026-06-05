@@ -1,16 +1,70 @@
+# file: action.yml
+# version: 2.0.0
+
 name: 'Rust Release Build'
-description: 'Build and test Rust crates for release'
-author: 'jdfalk'
+description: 'Build, test, lint, and optionally publish Rust crates'
+author: 'falkcorp'
+
+branding:
+  icon: 'package'
+  color: 'orange'
 
 inputs:
+  # --- orchestration inputs (from wrapper) ---
   release-version:
-    description: 'Release version tag'
+    description: 'Release version tag (informational, passed to crate metadata)'
     required: false
     default: ''
   protobuf-artifacts:
-    description: 'Whether protobuf artifacts are available'
+    description: 'Whether protobuf artifacts are available from an earlier job step'
     required: false
     default: 'false'
+
+  # --- implementation inputs (from base) ---
+  rust-version:
+    description: 'Rust toolchain version to use'
+    required: false
+    default: 'stable'
+  manifest-path:
+    description: 'Path to Cargo.toml'
+    required: false
+    default: './Cargo.toml'
+  crate-token:
+    description: 'crates.io API token (leave empty to skip publish)'
+    required: false
+    default: ''
+  run-tests:
+    description: 'Run tests before publishing'
+    required: false
+    default: 'true'
+  run-clippy:
+    description: 'Run clippy linter'
+    required: false
+    default: 'true'
+  check-format:
+    description: 'Check code formatting with rustfmt'
+    required: false
+    default: 'true'
+  dry-run:
+    description: 'Perform a dry run (do not actually publish to crates.io)'
+    required: false
+    default: 'true'
+  features:
+    description: 'Cargo features to enable (comma-separated)'
+    required: false
+    default: ''
+  all-features:
+    description: 'Enable all Cargo features'
+    required: false
+    default: 'false'
+
+outputs:
+  crate-name:
+    description: 'Name of the built crate'
+    value: ${{ steps.metadata.outputs.name }}
+  crate-version:
+    description: 'Version of the built crate'
+    value: ${{ steps.metadata.outputs.version }}
 
 runs:
   using: 'composite'
@@ -22,16 +76,81 @@ runs:
         name: protobuf-generated
         path: proto-generated
 
-    - name: Build and test Rust
-      uses: falkcorp/gha-release-rust@802c77330bc57b1b97f123958131f40ccb2f4896 # v1.0.3
+    - name: Set up Rust
+      uses: actions-rust-lang/setup-rust-toolchain@2b1f5e9b395427c92ee4e3331786ca3c37afe2d7 # v1.16.0
       with:
-        rust-version: stable
-        manifest-path: ./Cargo.toml
-        crate-token: dummy-no-publish
-        run-tests: 'true'
-        run-clippy: 'true'
-        check-format: 'true'
-        dry-run: 'true'
+        toolchain: ${{ inputs.rust-version }}
+        components: clippy, rustfmt
+
+    - name: Extract crate metadata
+      id: metadata
+      shell: bash
+      run: |
+        MANIFEST="${{ inputs.manifest-path }}"
+        NAME=$(cargo metadata --manifest-path $MANIFEST \
+          --format-version 1 --no-deps | jq -r '.packages[0].name')
+        VERSION=$(cargo metadata --manifest-path $MANIFEST \
+          --format-version 1 --no-deps | jq -r '.packages[0].version')
+        echo "name=$NAME" >> $GITHUB_OUTPUT
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    - name: Check formatting
+      if: inputs.check-format == 'true'
+      shell: bash
+      run: cargo fmt --manifest-path ${{ inputs.manifest-path }} -- --check
+
+    - name: Run clippy
+      if: inputs.run-clippy == 'true'
+      shell: bash
+      run: |
+        FEATURES_ARG=""
+        if [ "${{ inputs.all-features }}" == "true" ]; then
+          FEATURES_ARG="--all-features"
+        elif [ -n "${{ inputs.features }}" ]; then
+          FEATURES_ARG="--features ${{ inputs.features }}"
+        fi
+        cargo clippy --manifest-path ${{ inputs.manifest-path }} $FEATURES_ARG -- -D warnings
+
+    - name: Run tests
+      if: inputs.run-tests == 'true'
+      shell: bash
+      run: |
+        FEATURES_ARG=""
+        if [ "${{ inputs.all-features }}" == "true" ]; then
+          FEATURES_ARG="--all-features"
+        elif [ -n "${{ inputs.features }}" ]; then
+          FEATURES_ARG="--features ${{ inputs.features }}"
+        fi
+        cargo test --manifest-path ${{ inputs.manifest-path }} $FEATURES_ARG
+
+    - name: Build crate
+      shell: bash
+      run: |
+        FEATURES_ARG=""
+        if [ "${{ inputs.all-features }}" == "true" ]; then
+          FEATURES_ARG="--all-features"
+        elif [ -n "${{ inputs.features }}" ]; then
+          FEATURES_ARG="--features ${{ inputs.features }}"
+        fi
+        cargo build --manifest-path ${{ inputs.manifest-path }} --release $FEATURES_ARG
+
+    - name: Publish to crates.io
+      if: inputs.crate-token != '' && inputs.crate-token != 'dummy-no-publish'
+      shell: bash
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ inputs.crate-token }}
+      run: |
+        DRY_RUN=""
+        if [ "${{ inputs.dry-run }}" == "true" ]; then
+          DRY_RUN="--dry-run"
+        fi
+        FEATURES_ARG=""
+        if [ "${{ inputs.all-features }}" == "true" ]; then
+          FEATURES_ARG="--all-features"
+        elif [ -n "${{ inputs.features }}" ]; then
+          FEATURES_ARG="--features ${{ inputs.features }}"
+        fi
+        cargo publish --manifest-path ${{ inputs.manifest-path }} $DRY_RUN $FEATURES_ARG --allow-dirty
 
     - name: Upload Rust artifacts
       if: always()
@@ -41,3 +160,21 @@ runs:
         path: target/release/*
         if-no-files-found: ignore
         retention-days: 14
+
+    - name: Output summary
+      shell: bash
+      run: |
+        {
+          echo "## Rust Crate Release Summary"
+          echo ""
+          echo "**Crate:** ${{ steps.metadata.outputs.name }}"
+          echo "**Version:** ${{ steps.metadata.outputs.version }}"
+          echo "**Rust:** ${{ inputs.rust-version }}"
+          if [ "${{ inputs.dry-run }}" == "true" ]; then
+            echo "**Status:** Dry run (not published)"
+          elif [ -z "${{ inputs.crate-token }}" ] || [ "${{ inputs.crate-token }}" == "dummy-no-publish" ]; then
+            echo "**Status:** Not published (no crate-token)"
+          else
+            echo "**Registry:** crates.io"
+          fi
+        } >> $GITHUB_STEP_SUMMARY
